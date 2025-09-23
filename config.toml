@@ -1,0 +1,48 @@
+# Configuration for the Solana RPC Speed Test tool
+
+# A standard Solana RPC endpoint for fetching blockhashes and checking transaction statuses.
+base_rpc_url = "https://api.mainnet-beta.solana.com"
+
+# Signer keypair.
+# Can be a path to a JSON file (e.g., "~/.config/solana/id.json")
+# or a base58-encoded private key string.
+signer = "~/.config/solana/id.json"
+
+# Number of transactions to send for the test
+num_transactions = 10
+
+# Interval between each test run in milliseconds
+interval_ms = 2000
+
+log_level = "info"
+
+# Tip amount in SOL
+tip_amount_sol = 1
+
+# List of Accelerator config to test.
+[[accelerators]]
+name = "Flashblock NY"
+url = "http://ny.flashblock.trade/api/v2/submit-batch"
+tip_accounts = [
+    "FLashhsorBmM9dLpuq6qATawcpqk1Y2aqaZfkd48iT3W",
+    "FLAshyAyBcKb39KPxSzXcepiS8iDYUhDGwJcJDPX4g2B",
+    "FLaShB3iXXTWE1vu9wQsChUKq3HFtpMAhb8kAh1pf1wi",
+]
+# Headers are defined as an inline table.
+headers = { Authorization = "YOUR_API_KEY" }
+request_format = { body_template = "{ \"id\": 1, \"method\": \"sendTransaction\", \"transactions\": [\"{tx}\"] }" }
+
+[[accelerators]]
+name = "Jito"
+url = "https://mainnet.block-engine.jito.wtf/api/v1/transactions"
+tip_accounts = [
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+]
+request_format = { body_template = "{ \"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"sendTransaction\", \"params\": [\"{tx}\", {\"encoding\": \"base64\"}] }" }
