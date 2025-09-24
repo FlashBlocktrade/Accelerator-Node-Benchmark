@@ -1,5 +1,11 @@
 # Nodes Speed Test
 
+// Disclaimer / 免责声明
+// English: This example only demonstrates how to use our product. It does not constitute trading
+// advice or a trading/execution system. Use at your own risk. We are not responsible for any loss
+// caused by using this code.
+// 中文：本示例仅演示如何使用我们的产品，不构成任何交易建议或交易/执行系统。使用本代码所造成的任何损失，概不负责。
+
 A Rust-based tool for benchmarking the performance of Solana RPC nodes by racing transactions against each other.
 
 ## Overview
