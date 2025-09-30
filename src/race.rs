@@ -1,5 +1,5 @@
 use crate::config::AcceleratorConfig;
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use futures::future::join_all;
 use log::{debug, error, info, warn};
 use rand::Rng;
@@ -7,7 +7,6 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcBlockConfig, RpcTransactionConfig};
 use solana_sdk::{
     commitment_config::CommitmentConfig,
-
     native_token::sol_to_lamports,
     pubkey::Pubkey,
     signature::{Keypair, Signature, Signer},
@@ -15,6 +14,7 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use solana_transaction_status::{TransactionDetails, UiTransactionEncoding};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     error::Error,
@@ -24,13 +24,11 @@ use std::{
 };
 use tokio::time::sleep;
 
-// Result of a single race, contains the winner
 #[derive(Debug, Clone)]
 pub struct RaceResult {
     pub name: String,
 }
 
-// Result of a single API send attempt
 #[derive(Debug, Clone)]
 pub struct SendAttempt {
     pub name: String,
@@ -38,18 +36,11 @@ pub struct SendAttempt {
     pub is_success: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SentTransaction {
     pub signature: Signature,
     pub name: String,
     pub race_number: u32,
-}
-
-#[derive(Debug, Clone)]
-struct ProcessedTransaction {
-    signature: Signature,
-    name: String,
-    race_number: u32,
 }
 
 pub async fn send_transactions(
@@ -61,7 +52,6 @@ pub async fn send_transactions(
     race_number: u32,
 ) -> Result<(Vec<SentTransaction>, Vec<SendAttempt>), Box<dyn Error>> {
     let blockhash = rpc_client.get_latest_blockhash().await?;
-
     let tip_lamports = sol_to_lamports(tip_amount_sol);
 
     let mut transactions = Vec::new();
@@ -87,8 +77,6 @@ pub async fn send_transactions(
         );
         transactions.push((tx, acc_config.clone()));
     }
-
-
 
     let mut send_futs = Vec::new();
     for (tx, acc_config) in transactions {
@@ -186,119 +174,70 @@ pub async fn send_transactions(
     Ok((sent_txs, send_attempts))
 }
 
-pub async fn process_races(
-    sent_transactions: Vec<SentTransaction>,
+pub async fn process_races_from_groups(
+    races: HashMap<u32, Vec<SentTransaction>>,
     rpc_client: Arc<RpcClient>,
     num_races: u32,
 ) -> Result<(Vec<RaceResult>, u32), Box<dyn Error>> {
-    if sent_transactions.is_empty() {
-        error!("No transactions were successfully sent to any accelerator.");
-        return Ok((Vec::new(), num_races));
-    }
-
-    info!(
-        "Waiting for on-chain confirmation for {} transactions...",
-        sent_transactions.len()
-    );
-
-    let mut sent_txs_map: HashMap<Signature, SentTransaction> = sent_transactions
-        .into_iter()
-        .map(|tx| (tx.signature, tx))
-        .collect();
-
-    let mut processed_txs: Vec<ProcessedTransaction> = Vec::new();
-    let poll_start_time = Instant::now();
-
-    while !sent_txs_map.is_empty() && poll_start_time.elapsed() < Duration::from_secs(180) {
-        info!("Polling for {} remaining signatures...", sent_txs_map.len());
-        let signatures_to_poll: Vec<Signature> = sent_txs_map.keys().cloned().collect();
-        let statuses = rpc_client
-            .get_signature_statuses(&signatures_to_poll)
-            .await?
-            .value;
-
-        let mut landed_sigs = Vec::new();
-
-        for (i, status_opt) in statuses.iter().enumerate() {
-            if let Some(status) = status_opt {
-                let sig = signatures_to_poll[i];
-                if sent_txs_map.contains_key(&sig)
-                    && (status.confirmation_status.is_some() || status.err.is_some())
-                {
-                    let sent_tx = sent_txs_map.remove(&sig).unwrap();
-                    landed_sigs.push(sig);
-
-                    let outcome = if let Some(e) = &status.err {
-                        format!("Failure({})", e)
-                    } else {
-                        "Success".to_string()
-                    };
-                    info!(
-                        "Landed on-chain (Status: {}): {} | Signature: {}",
-                        outcome, sent_tx.name, sig
-                    );
-
-                    processed_txs.push(ProcessedTransaction {
-                        signature: sig,
-                        name: sent_tx.name,
-                        race_number: sent_tx.race_number,
-                    });
-                }
-            }
-        }
-
-        if !landed_sigs.is_empty() {
-            // Rebuild the map and poll list to only include remaining transactions
-            sent_txs_map.retain(|sig, _| !landed_sigs.contains(sig));
-        }
-
-        if !sent_txs_map.is_empty() {
-            sleep(Duration::from_millis(500)).await;
-        }
-    }
-
-    if !sent_txs_map.is_empty() {
-        warn!(
-            "{} transactions did not confirm within the timeout.",
-            sent_txs_map.len()
-        );
-    }
-
-    if processed_txs.is_empty() {
-        info!("No transactions landed on-chain within the timeout.");
-        return Ok((Vec::new(), num_races));
-    }
-
     let mut race_winners = Vec::new();
     let mut processed_races = 0;
 
-    let mut races: HashMap<u32, Vec<ProcessedTransaction>> = HashMap::new();
-    for tx in processed_txs {
-        races.entry(tx.race_number).or_default().push(tx);
-    }
+    let mut race_keys: Vec<_> = races.keys().cloned().collect();
+    race_keys.sort(); // Process races in order
 
-    for (race_num, race_txs) in races {
+    for race_num in race_keys {
+        let race_txs = races.get(&race_num).unwrap();
         processed_races += 1;
-        info!(
-            "--- Processing Race #{} ---",
-            race_num + 1
-        );
+        info!("--- Processing Race #{} ---", race_num + 1);
 
+        // 1. Poll for this race's transactions to land
+        let mut landed_txs = Vec::new();
+        let poll_start_time = Instant::now();
+        let mut txs_to_poll: HashMap<_, _> = race_txs.iter().map(|tx| (tx.signature, tx)).collect();
+
+        while !txs_to_poll.is_empty() && poll_start_time.elapsed() < Duration::from_secs(120) {
+            let sigs: Vec<_> = txs_to_poll.keys().cloned().collect();
+            match rpc_client.get_signature_statuses(&sigs).await {
+                Ok(statuses) => {
+                    for (i, status) in statuses.value.iter().enumerate() {
+                        if let Some(status) = status {
+                            if status.confirmation_status.is_some() || status.err.is_some() {
+                                let sig = sigs[i];
+                                if let Some(tx) = txs_to_poll.remove(&sig) {
+                                    landed_txs.push(tx.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Error polling signatures for race #{}: {}", race_num + 1, e);
+                }
+            }
+            if txs_to_poll.is_empty() {
+                break;
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        if landed_txs.is_empty() {
+            warn!("No transactions confirmed for race #{}", race_num + 1);
+            continue;
+        }
+
+        // 2. Get slots for landed transactions
         let mut tx_slots = HashMap::new();
         let mut futs = Vec::new();
-        for tx in &race_txs {
+        for tx in &landed_txs {
             let rpc_client_clone = Arc::clone(&rpc_client);
             let sig = tx.signature;
             futs.push(tokio::spawn(async move {
                 let config = RpcTransactionConfig {
-                    encoding: Some(UiTransactionEncoding::Base64),
+                    encoding: Some(UiTransactionEncoding::JsonParsed),
                     commitment: Some(CommitmentConfig::confirmed()),
                     max_supported_transaction_version: Some(0),
                 };
-                match rpc_client_clone
-                    .get_transaction_with_config(&sig, config)
-                    .await
-                {
+                match rpc_client_clone.get_transaction_with_config(&sig, config).await {
                     Ok(tx_info) => Some((sig, tx_info.slot)),
                     Err(_) => None,
                 }
@@ -308,7 +247,7 @@ pub async fn process_races(
         let results = join_all(futs).await;
         let mut earliest_slot = u64::MAX;
         for res in results {
-            if let Some(Some((sig, slot))) = res.ok() {
+            if let Ok(Some((sig, slot))) = res {
                 tx_slots.insert(sig, slot);
                 if slot < earliest_slot {
                     earliest_slot = slot;
@@ -316,24 +255,12 @@ pub async fn process_races(
             }
         }
 
-        for tx in &race_txs {
-            if let Some(slot) = tx_slots.get(&tx.signature) {
-                info!("Landed transaction: {} in slot {}", tx.name, slot);
-            }
-        }
-
         if earliest_slot == u64::MAX {
-            error!(
-                "Race #{}: Could not determine slot for any processed transaction.",
-                race_num + 1
-            );
+            error!("Race #{}: Could not determine slot for any processed transaction.", race_num + 1);
             continue;
         }
 
-
-
-
-
+        // 3. Fetch the block and find the winner by index
         let block_config = RpcBlockConfig {
             encoding: Some(UiTransactionEncoding::Base64),
             transaction_details: Some(TransactionDetails::Full),
@@ -342,41 +269,18 @@ pub async fn process_races(
             max_supported_transaction_version: Some(0),
         };
 
-        let mut block: Option<solana_transaction_status::UiConfirmedBlock> = None;
-        const MAX_RETRIES: u32 = 5;
-
-        for i in 0..MAX_RETRIES {
-            let block_result = rpc_client
-                .get_block_with_config(earliest_slot, block_config.clone())
-                .await;
-            match block_result {
-                Ok(fetched_block) => {
-                    block = Some(fetched_block);
-                    break;
-                }
-                Err(e) => {
-                    if e.to_string().contains("-32004")
-                        || e.to_string().contains("Block not available")
-                    {
-                        warn!(
-                            "Block {} not available, retrying... ({}/{})",
-                            earliest_slot,
-                            i + 1,
-                            MAX_RETRIES
-                        );
-                        sleep(Duration::from_millis(400)).await;
-                    } else {
-                        error!("Error fetching block {}: {}", earliest_slot, e);
-                        break;
-                    }
-                }
+        let block = match rpc_client.get_block_with_config(earliest_slot, block_config).await {
+            Ok(block) => Some(block),
+            Err(e) => {
+                error!("Error fetching block {}: {}", earliest_slot, e);
+                None
             }
-        }
+        };
 
-        let mut winner: Option<&ProcessedTransaction> = None;
+        let mut winner: Option<&SentTransaction> = None;
         if let Some(block) = block {
             let mut winner_index = u32::MAX;
-            let competing_sigs_in_slot: HashMap<Signature, &ProcessedTransaction> = race_txs
+            let competing_sigs_in_slot: HashMap<Signature, &SentTransaction> = landed_txs
                 .iter()
                 .filter(|tx| tx_slots.get(&tx.signature) == Some(&earliest_slot))
                 .map(|tx| (tx.signature, tx))
@@ -388,7 +292,6 @@ pub async fn process_races(
                         if !tx.signatures.is_empty() {
                             let sig = tx.signatures[0];
                             if let Some(competing_tx) = competing_sigs_in_slot.get(&sig) {
-
                                 if (index as u32) < winner_index {
                                     winner_index = index as u32;
                                     winner = Some(competing_tx);
@@ -411,17 +314,10 @@ pub async fn process_races(
                     name: the_winner.name.clone(),
                 });
             } else {
-                error!(
-                    "Could not find any competing transactions in block {}.",
-                    earliest_slot
-                );
+                error!("Could not find any competing transactions in block {}.", earliest_slot);
             }
         } else {
-            error!(
-                "Could not fetch block {} after retries. Winner for race #{} cannot be determined.",
-                earliest_slot,
-                race_num + 1
-            );
+            error!("Could not fetch block {}. Winner for race #{} cannot be determined.", earliest_slot, race_num + 1);
         }
     }
 
